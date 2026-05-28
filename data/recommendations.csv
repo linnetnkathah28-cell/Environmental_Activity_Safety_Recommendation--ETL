@@ -1,0 +1,13 @@
+recommendation_id,location_id,weather_id,air_quality_id,activity_id,safety_guidance_id,recommendation_time,condition_type,recommendation_reason
+1,1,1,1,1,12,2026-01-15 09:15:00,Clear Sky,Clear conditions and acceptable AQI support light outdoor activity.
+2,1,2,2,5,4,2026-01-15 10:15:00,High UV,High UV makes a shaded outdoor option with strong sun protection safer.
+3,1,3,3,7,5,2026-01-15 11:15:00,Heavy Rain,Heavy rain favors an indoor activity with rain protection when traveling.
+4,1,4,4,8,9,2026-01-15 12:15:00,Poor Air Quality,Elevated AQI supports choosing an indoor activity and limiting exposure.
+5,1,5,5,10,5,2026-01-15 13:15:00,Light Rain,Light rain supports a low-exposure indoor social option with umbrella guidance.
+6,1,6,6,12,8,2026-01-15 14:15:00,Windy,Wind conditions make indoor recreation safer than exposed outdoor plans.
+7,1,7,7,6,6,2026-01-15 15:15:00,Cold Weather,Cold conditions support a short winter walk with warm clothing.
+8,1,8,8,5,11,2026-01-15 16:15:00,Heat,"High temperature supports shaded activity, hydration, and reduced intensity."
+9,1,9,9,6,7,2026-01-15 17:15:00,Light Snow,Light snow supports short outdoor activity with winter/surface safety guidance.
+10,1,10,10,2,12,2026-01-15 18:15:00,Partly Cloudy,Mild partly cloudy conditions support cycling with normal weather preparation.
+11,1,11,11,5,1,2026-01-15 19:15:00,Humid,"Humidity supports shaded activity, light clothing, and shorter exposure."
+12,1,12,12,11,10,2026-01-15 20:15:00,Heavy Snow,Heavy snow favors staying home or choosing an indoor option.

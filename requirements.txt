@@ -1,0 +1,13 @@
+# Core data stack
+pandas>=2.0.0
+openpyxl>=3.1.0          # required by pandas to read .xlsx files
+sqlalchemy>=2.0.0
+psycopg2-binary>=2.9.0   # PostgreSQL adapter
+
+# Open-Meteo API client
+openmeteo-requests>=0.2.0
+requests-cache>=1.1.0
+retry-requests>=0.1.0
+
+# Environment variable management
+python-dotenv>=1.0.0

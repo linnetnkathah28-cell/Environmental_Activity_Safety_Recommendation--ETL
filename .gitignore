@@ -1,0 +1,36 @@
+# ── Environment & secrets ──────────────────────────────────
+.env
+*.env
+
+# ── Python cache ───────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+
+# ── Virtual environments ───────────────────────────────────
+.venv/
+venv/
+env/
+ENV/
+
+# ── API request cache (openmeteo-requests) ─────────────────
+.cache/
+*.sqlite
+
+# ── Pipeline logs ──────────────────────────────────────────
+*.log
+
+# ── Generated analytics exports ───────────────────────────
+data/analytics_forecast.csv
+data/analytics_recommendations.csv
+data/weather_forecast.csv
+data/air_quality_forecast.csv
+
+# ── OS & editor noise ──────────────────────────────────────
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
