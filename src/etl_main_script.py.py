@@ -722,9 +722,19 @@ def upsert_dimension(df: pd.DataFrame, table_name: str, engine, pk_col: str) -> 
     inserted = 0
     skipped  = 0
 
+    def _sanitise(record: dict) -> dict:
+        """Replace any NaN/NaT value with None so Postgres INT/NUMERIC columns don't error."""
+        sanitised = {}
+        for k, v in record.items():
+            try:
+                sanitised[k] = None if pd.isna(v) else v
+            except (TypeError, ValueError):
+                sanitised[k] = v  # non-scalar types — pass through
+        return sanitised
+
     with engine.begin() as conn:
         for record in records:
-            result = conn.execute(sql, record)
+            result = conn.execute(sql, _sanitise(record))
             if result.rowcount == 1:
                 inserted += 1
             else:
@@ -736,22 +746,69 @@ def upsert_dimension(df: pd.DataFrame, table_name: str, engine, pk_col: str) -> 
     )
 
 
-def write_table(df: pd.DataFrame, table_name: str, engine, dtype: dict) -> None:
-    """Append a DataFrame to the named PostgreSQL table (used by incremental_load)."""
+def write_table(
+    df: pd.DataFrame,
+    table_name: str,
+    engine,
+    dtype: dict,
+    pk_col: str = "weather_id",
+) -> None:
+    """
+    Upsert a DataFrame into the named PostgreSQL table using
+    INSERT … ON CONFLICT (pk_col) DO NOTHING.
+
+    This replaces the previous plain-append approach so that re-running the
+    pipeline never raises a UniqueViolation on the primary-key column, even
+    if the date-based filter in incremental_load passes rows whose PK already
+    exists (e.g. after a partial failure or a clock/timezone mismatch between
+    Python date objects and the Postgres timestamp stored in the DB).
+    """
     if df.empty:
         log.info("  Skipping %s — no new rows to load.", table_name)
         return
+
     log.info("  Loading %s: %d rows …", table_name, len(df))
-    df.to_sql(
-        table_name, engine,
-        schema="public",
-        if_exists="append",
-        index=False,
-        method="multi",
-        chunksize=500,
-        dtype=dtype,
+
+    cols         = ", ".join(df.columns)
+    placeholders = ", ".join(f":{c}" for c in df.columns)
+    sql = text(
+        f"INSERT INTO public.{table_name} ({cols}) "
+        f"VALUES ({placeholders}) "
+        f"ON CONFLICT ({pk_col}) DO NOTHING"
     )
-    log.info("  %s loaded successfully.", table_name)
+
+    def _sanitise(record: dict) -> dict:
+        """
+        Replace any NaN / NaT / numpy scalar that is NA with Python None so
+        that psycopg2 sends a proper SQL NULL rather than trying to coerce a
+        float NaN into an INTEGER column (raises NumericValueOutOfRange).
+        pd.isna() handles plain float NaN, numpy.nan, numpy.float64('nan'),
+        and pandas NaT in one call — safer than isinstance(v, float) alone.
+        """
+        sanitised = {}
+        for k, v in record.items():
+            try:
+                sanitised[k] = None if pd.isna(v) else v
+            except (TypeError, ValueError):
+                sanitised[k] = v  # non-scalar types (lists, dicts) — pass through
+        return sanitised
+
+    records  = df.to_dict(orient="records")
+    inserted = 0
+    skipped  = 0
+
+    with engine.begin() as conn:
+        for record in records:
+            result = conn.execute(sql, _sanitise(record))
+            if result.rowcount == 1:
+                inserted += 1
+            else:
+                skipped += 1
+
+    log.info(
+        "  %s — %d inserted, %d already existed (skipped).",
+        table_name, inserted, skipped,
+    )
 
 
 def incremental_load(
@@ -760,10 +817,17 @@ def incremental_load(
     engine,
     dtype: dict,
     date_col: str = "forecast_date",
+    pk_col: str = "weather_id",
 ) -> None:
     """
-    Load only rows whose forecast_date is not already present in the table.
-    This prevents duplicate inserts on repeated pipeline runs.
+    Load only rows whose forecast_date is not already present in the table,
+    then upsert via write_table (ON CONFLICT DO NOTHING on pk_col).
+
+    The date filter is a fast-path optimisation that avoids sending rows we
+    already know exist.  The ON CONFLICT guard in write_table is the safety
+    net that prevents UniqueViolation errors even when the date filter lets a
+    row through (e.g. partial prior failures, type mismatches between Python
+    date objects and Postgres timestamps, or ID regeneration across runs).
     """
     existing = get_existing_dates(engine, table_name, date_col)
     if existing:
@@ -779,7 +843,7 @@ def incremental_load(
         log.info("  [INCREMENTAL] No new rows for %s — already up to date.", table_name)
         return
 
-    write_table(new_df, table_name, engine, dtype)
+    write_table(new_df, table_name, engine, dtype, pk_col=pk_col)
 
 
 # ===========================================================================
@@ -821,7 +885,7 @@ def load_all_tables(
         "precipitation_sum": Numeric(), "precipitation_hours": Numeric(),
         "precipitation_probability_max": Numeric(),
         "wind_speed_10m_max": Numeric(), "wind_gusts_10m_max": Numeric(),
-    })
+    }, pk_col="weather_id")
 
     incremental_load(air_quality_df, "air_quality_forecast", engine, {
         "air_quality_id": Integer(), "location_id": Integer(),
@@ -829,7 +893,7 @@ def load_all_tables(
         "pm10": Numeric(), "pm25": Numeric(), "carbon_monoxide": Numeric(),
         "nitrogen_dioxide": Numeric(), "ozone": Numeric(),
         "uv_index": Numeric(), "aqi_european": Numeric(), "aqi_us": Numeric(),
-    })
+    }, pk_col="air_quality_id")
 
     incremental_load(recommendations_df, "recommendations", engine, {
         "recommendation_id": Integer(), "location_id": Integer(),
@@ -837,7 +901,7 @@ def load_all_tables(
         "activity_id": Integer(), "safety_guidance_id": Integer(),
         "forecast_date": DateTime(), "condition_type": String(),
         "recommendation_reason": String(),
-    })
+    }, pk_col="recommendation_id")
 
     log.info("===== ALL TABLES LOADED =====")
 
@@ -963,4 +1027,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-    
