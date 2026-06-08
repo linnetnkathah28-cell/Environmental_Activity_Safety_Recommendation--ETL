@@ -193,16 +193,9 @@ def kpi(label: str, value: str, sub: str = "", color: str = PALETTE["accent2"]):
 
 
 # ---------------------------------------------------------------------------
-# KPI values (computed at startup)
+# Header date range label (static — shows full dataset span)
 # ---------------------------------------------------------------------------
 
-avg_temp_f   = round(weather_df["temp_max_f"].mean(), 1) if not weather_df.empty else "—"
-max_uv       = weather_df["uv_index_max"].max() if not weather_df.empty else "—"
-avg_aqi      = round(air_df["aqi_us"].mean(), 1) if not air_df.empty else "—"
-rain_days    = int((weather_df["precipitation_probability_max"] > 50).sum()) if not weather_df.empty else "—"
-top_cond     = recs_df["condition_type"].mode()[0] if not recs_df.empty else "—"
-
-# Date range label
 if not weather_df.empty:
     d0 = weather_df["forecast_date"].min().strftime("%b %d")
     d1 = weather_df["forecast_date"].max().strftime("%b %d, %Y")
@@ -266,18 +259,11 @@ app.layout = html.Div(
             style={"maxWidth": "1400px", "margin": "0 auto", "padding": "28px 24px"},
             children=[
 
-                # ── KPI row ─────────────────────────────────────────────────
-                html.Div(
+                # ── KPI row (dynamic — updated by callback) ──────────────────
+                html.Div(id="kpi-row",
                     style={"display": "grid",
                            "gridTemplateColumns": "repeat(5, 1fr)",
                            "gap": "14px", "marginBottom": "24px"},
-                    children=[
-                        kpi("Avg High Temp",      f"{avg_temp_f}°F",   "7-day forecast",    PALETTE["warn"]),
-                        kpi("Peak UV Index",      str(max_uv),          "max over period",   PALETTE["danger"]),
-                        kpi("Avg AQI (US)",       str(avg_aqi),         "air quality index", PALETTE["accent2"]),
-                        kpi("Rainy Days",         str(rain_days),       "prob > 50%",        PALETTE["accent2"]),
-                        kpi("Dominant Condition", top_cond,             "most frequent",     PALETTE["accent"]),
-                    ]
                 ),
 
                 # ── Filters row ─────────────────────────────────────────────
@@ -449,6 +435,8 @@ app.layout = html.Div(
 
         # Interval for optional live refresh (every 10 min)
         dcc.Interval(id="refresh-interval", interval=600_000, n_intervals=0),
+        # Hidden div that fires once on page load to initialise all charts
+        html.Div(id="_init-trigger", **{"data-loaded": "0"}, style={"display": "none"}),
     ]
 )
 
@@ -457,6 +445,7 @@ app.layout = html.Div(
 # ---------------------------------------------------------------------------
 
 @app.callback(
+    Output("kpi-row",         "children"),
     Output("temp-chart",      "figure"),
     Output("uv-precip-chart", "figure"),
     Output("aqi-chart",       "figure"),
@@ -469,17 +458,26 @@ app.layout = html.Div(
     Input("condition-filter", "value"),
     Input("temp-unit",        "value"),
     Input("refresh-interval", "n_intervals"),
+    Input("_init-trigger",    "data-loaded"),
 )
-def update_all(start_date, end_date, condition, temp_unit, _n):
+def update_all(start_date, end_date, condition, temp_unit, _n, _init):
     # Re-fetch on refresh trigger
     wdf  = fetch_weather()
     adf  = fetch_air_quality()
     rdf  = fetch_recommendations()
 
-    # Apply date filter
+    # Apply date filter — DatePickerRange sends ISO strings; fall back to full
+    # range when values are None (initial load before user interaction)
     if start_date and end_date:
         sd = pd.to_datetime(start_date).date()
         ed = pd.to_datetime(end_date).date()
+    elif not wdf.empty:
+        sd = wdf["forecast_date"].dt.date.min()
+        ed = wdf["forecast_date"].dt.date.max()
+    else:
+        sd = ed = None
+
+    if sd and ed:
         wdf = wdf[(wdf["forecast_date"].dt.date >= sd) & (wdf["forecast_date"].dt.date <= ed)]
         adf = adf[(adf["forecast_date"].dt.date >= sd) & (adf["forecast_date"].dt.date <= ed)]
         rdf = rdf[(rdf["forecast_date"].dt.date >= sd) & (rdf["forecast_date"].dt.date <= ed)]
@@ -725,7 +723,23 @@ def update_all(start_date, end_date, condition, temp_unit, _n):
 
     recs_component = html.Div(rows_html)
 
-    return temp_fig, uv_fig, aqi_fig, pie_fig, wind_fig, poll_fig, recs_component
+    # ── Dynamic KPI cards (reflect current date-filtered data + temp unit) ─────
+    temp_kpi_col  = "temp_max_f" if temp_unit == "F" else "temperature_2m_max"
+    dyn_avg_temp  = round(wdf[temp_kpi_col].mean(), 1)   if not wdf.empty else "—"
+    dyn_max_uv    = wdf["uv_index_max"].max()             if not wdf.empty else "—"
+    dyn_avg_aqi   = round(adf["aqi_us"].mean(), 1)        if not adf.empty else "—"
+    dyn_rain_days = int((wdf["precipitation_probability_max"] > 50).sum()) if not wdf.empty else "—"
+    dyn_top_cond  = rdf["condition_type"].mode()[0]       if not rdf.empty else "—"
+
+    kpi_children = [
+        kpi("Avg High Temp",      f"{dyn_avg_temp}{unit_lbl}", "7-day forecast",    PALETTE["warn"]),
+        kpi("Peak UV Index",      str(dyn_max_uv),              "max over period",   PALETTE["danger"]),
+        kpi("Avg AQI (US)",       str(dyn_avg_aqi),             "air quality index", PALETTE["accent2"]),
+        kpi("Rainy Days",         str(dyn_rain_days),           "prob > 50%",        PALETTE["accent2"]),
+        kpi("Dominant Condition", dyn_top_cond,                 "most frequent",     PALETTE["accent"]),
+    ]
+
+    return kpi_children, temp_fig, uv_fig, aqi_fig, pie_fig, wind_fig, poll_fig, recs_component
 
 
 # ---------------------------------------------------------------------------
