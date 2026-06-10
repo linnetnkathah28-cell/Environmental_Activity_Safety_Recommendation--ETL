@@ -396,6 +396,81 @@ def clean_weather_codes(df: pd.DataFrame) -> pd.DataFrame:
     return df.drop_duplicates(subset=["weather_code_id"])
 
 
+# Complete WMO weather code lookup (superset of what any xlsx might contain)
+_WMO_CODES: dict[int, tuple[str, str, bool]] = {
+    0:  ("Clear Sky",            "Clear sky",                                    False),
+    1:  ("Mainly Clear",         "Mainly clear",                                 False),
+    2:  ("Partly Cloudy",        "Partly cloudy",                                False),
+    3:  ("Overcast",             "Overcast",                                     False),
+    45: ("Fog",                  "Fog",                                          False),
+    48: ("Icy Fog",              "Depositing rime fog",                          False),
+    51: ("Light Drizzle",        "Light drizzle",                                True),
+    53: ("Moderate Drizzle",     "Moderate drizzle",                             True),
+    55: ("Dense Drizzle",        "Dense intensity drizzle",                      True),
+    56: ("Freezing Drizzle",     "Light freezing drizzle",                       True),
+    57: ("Heavy Freezing Drizzle","Heavy freezing drizzle",                      True),
+    61: ("Slight Rain",          "Slight rain",                                  True),
+    63: ("Moderate Rain",        "Moderate rain",                                True),
+    65: ("Heavy Rain",           "Heavy rain",                                   True),
+    66: ("Light Freezing Rain",  "Light freezing rain",                          True),
+    67: ("Heavy Freezing Rain",  "Heavy freezing rain",                          True),
+    71: ("Slight Snow",          "Slight snow fall",                             True),
+    73: ("Moderate Snow",        "Moderate snow fall",                           True),
+    75: ("Heavy Snow",           "Heavy snow fall",                              True),
+    77: ("Snow Grains",          "Snow grains",                                  True),
+    80: ("Slight Showers",       "Slight rain showers",                          True),
+    81: ("Moderate Showers",     "Moderate rain showers",                        True),
+    82: ("Violent Showers",      "Violent rain showers",                         True),
+    85: ("Slight Snow Showers",  "Slight snow showers",                          True),
+    86: ("Heavy Snow Showers",   "Heavy snow showers",                           True),
+    95: ("Thunderstorm",         "Thunderstorm",                                 True),
+    96: ("Thunderstorm w/ Hail", "Thunderstorm with slight hail",                True),
+    99: ("Thunderstorm w/ Heavy Hail", "Thunderstorm with heavy hail",           True),
+}
+
+
+def backfill_missing_weather_codes(
+    weather_codes_df: pd.DataFrame,
+    weather_df: pd.DataFrame,
+) -> pd.DataFrame:
+    """
+    Compare the weather_code_ids needed by this run's forecast against those
+    already in weather_codes_df and add any missing ones using the WMO lookup
+    table above.  This prevents ForeignKeyViolation errors when Open-Meteo
+    returns a code (e.g. 95 = Thunderstorm) that isn't in the reference xlsx.
+    """
+    needed  = set(weather_df["weather_code_id"].dropna().astype(int).unique())
+    present = set(weather_codes_df["weather_code_id"].astype(int).unique())
+    missing = needed - present
+
+    if not missing:
+        return weather_codes_df
+
+    log.warning(
+        "  [BACKFILL] weather_codes.xlsx is missing %d code(s): %s — "
+        "adding from WMO lookup table.",
+        len(missing), sorted(missing),
+    )
+
+    extra_rows = []
+    for code in sorted(missing):
+        if code in _WMO_CODES:
+            cname, desc, is_precip = _WMO_CODES[code]
+        else:
+            # Unknown code — create a generic placeholder so the FK never fails
+            cname, desc, is_precip = f"Unknown ({code})", f"WMO code {code}", False
+            log.warning("  [BACKFILL] No WMO mapping for code %d — using placeholder.", code)
+        extra_rows.append({
+            "weather_code_id": code,
+            "condition_name":  cname,
+            "description":     desc,
+            "is_precipitation": is_precip,
+        })
+
+    extra_df = pd.DataFrame(extra_rows)
+    return pd.concat([weather_codes_df, extra_df], ignore_index=True)
+
+
 def clean_activities(df: pd.DataFrame) -> pd.DataFrame:
     """Select, rename, type-cast, and deduplicate the activities dimension."""
     cols = [
@@ -432,9 +507,11 @@ def transform_weather_forecast(
     """
     df = raw_df.copy()
 
-    # Assign surrogate key — will be used for incremental deduplication later
+    # Assign surrogate key — offset from max existing PK so re-runs never collide
     df.insert(0, "weather_id", range(1, len(df) + 1))
     df.insert(1, "location_id", LOCATION["location_id"])
+    # NOTE: actual PK values are overwritten in incremental_load after we know
+    # which rows are genuinely new — see assign_new_pks() called there.
 
     # Map weather_code integer → weather_code_id FK
     code_map = weather_codes_df.set_index("weather_code_id")["condition_name"].to_dict()
@@ -469,6 +546,7 @@ def transform_air_quality_forecast(raw_df: pd.DataFrame) -> pd.DataFrame:
     df = raw_df.copy()
     df.insert(0, "air_quality_id", range(1, len(df) + 1))
     df.insert(1, "location_id", LOCATION["location_id"])
+    # NOTE: actual PK values overwritten in incremental_load via assign_new_pks()
 
     float_cols = [
         "pm10", "pm25", "carbon_monoxide",
@@ -689,13 +767,18 @@ def run_all_validations(
 # If a full reload is required, set RESET_TABLES=true in .env.
 
 def get_existing_dates(engine, table: str, date_col: str = "forecast_date") -> set:
-    """Return the set of forecast_dates already loaded into a given table."""
+    """Return the set of forecast_dates already loaded into a given table as date objects."""
     insp = inspect(engine)
     if not insp.has_table(table, schema="public"):
         return set()
     with engine.connect() as conn:
         rows = conn.execute(text(f"SELECT DISTINCT {date_col} FROM public.{table}")).fetchall()
-    return {r[0] for r in rows}
+    # Normalise to plain date objects — Postgres may return datetime or date
+    result = set()
+    for r in rows:
+        v = r[0]
+        result.add(v.date() if hasattr(v, "date") else v)
+    return result
 
 
 def upsert_dimension(df: pd.DataFrame, table_name: str, engine, pk_col: str) -> None:
@@ -811,6 +894,47 @@ def write_table(
     )
 
 
+def assign_new_pks(df: pd.DataFrame, pk_col: str, engine, table_name: str) -> pd.DataFrame:
+    """
+    Replace the placeholder 1-N PK values in df with IDs that start from
+    max(existing PK) + 1, so INSERT never conflicts with rows already in the DB.
+    """
+    insp = inspect(engine)
+    if insp.has_table(table_name, schema="public"):
+        with engine.connect() as conn:
+            row = conn.execute(
+                text(f"SELECT COALESCE(MAX({pk_col}), 0) FROM public.{table_name}")
+            ).fetchone()
+        max_pk = int(row[0])
+    else:
+        max_pk = 0
+    df = df.copy()
+    df[pk_col] = range(max_pk + 1, max_pk + 1 + len(df))
+    return df
+
+
+def delete_today_rows(engine, table_name: str, date_col: str = "forecast_date") -> None:
+    """
+    Delete any rows in the table where forecast_date = today (local date).
+    This ensures today's data is always refreshed with the latest API values
+    rather than being skipped by the incremental filter.
+    """
+    today = datetime.now().date()
+    insp  = inspect(engine)
+    if not insp.has_table(table_name, schema="public"):
+        return
+    with engine.begin() as conn:
+        result = conn.execute(
+            text(f"DELETE FROM public.{table_name} WHERE {date_col}::date = :today"),
+            {"today": today},
+        )
+    if result.rowcount:
+        log.info(
+            "  [TODAY-REFRESH] Deleted %d existing row(s) for %s from %s to allow re-insert.",
+            result.rowcount, today, table_name,
+        )
+
+
 def incremental_load(
     df: pd.DataFrame,
     table_name: str,
@@ -820,22 +944,26 @@ def incremental_load(
     pk_col: str = "weather_id",
 ) -> None:
     """
-    Load only rows whose forecast_date is not already present in the table,
-    then upsert via write_table (ON CONFLICT DO NOTHING on pk_col).
+    Load rows whose forecast_date is not already in the table, but always
+    refresh today's row with the latest API data.
 
-    The date filter is a fast-path optimisation that avoids sending rows we
-    already know exist.  The ON CONFLICT guard in write_table is the safety
-    net that prevents UniqueViolation errors even when the date filter lets a
-    row through (e.g. partial prior failures, type mismatches between Python
-    date objects and Postgres timestamps, or ID regeneration across runs).
+    Strategy:
+      1. Delete any existing rows for today so the fresh API values are inserted.
+      2. Skip dates that are already in the DB (future forecast days already loaded).
+      3. Insert the remaining new rows via write_table.
     """
+    # Always re-insert today's data (latest forecast may differ from earlier run)
+    delete_today_rows(engine, table_name, date_col)
+
     existing = get_existing_dates(engine, table_name, date_col)
     if existing:
         log.info(
             "  [INCREMENTAL] %s already contains %d date(s); filtering new rows only.",
             table_name, len(existing),
         )
-        new_df = df[~df[date_col].isin(existing)].copy()
+        # Normalise df dates to plain date objects for reliable comparison
+        df_dates = df[date_col].apply(lambda v: v.date() if hasattr(v, "date") else v)
+        new_df = df[~df_dates.isin(existing)].copy()
     else:
         new_df = df
 
@@ -843,6 +971,8 @@ def incremental_load(
         log.info("  [INCREMENTAL] No new rows for %s — already up to date.", table_name)
         return
 
+    # Re-assign PKs so they start above the current max — prevents ON CONFLICT skips
+    new_df = assign_new_pks(new_df, pk_col, engine, table_name)
     write_table(new_df, table_name, engine, dtype, pk_col=pk_col)
 
 
@@ -868,6 +998,9 @@ def load_all_tables(
 
     # --- Dimensions (upsert — safe to re-run, skips rows that already exist) ---
     upsert_dimension(locations_df,     "locations",       engine, pk_col="location_id")
+
+    # Ensure all weather codes used by this forecast exist before FK checks run
+    weather_codes_df = backfill_missing_weather_codes(weather_codes_df, weather_df)
     upsert_dimension(weather_codes_df, "weather_codes",   engine, pk_col="weather_code_id")
     upsert_dimension(activities_df,    "activities",      engine, pk_col="activity_id")
     upsert_dimension(safety_df,        "safety_guidance", engine, pk_col="safety_guidance_id")
