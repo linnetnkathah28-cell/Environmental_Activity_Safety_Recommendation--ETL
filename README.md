@@ -3,8 +3,7 @@
 
 A fully reproducible Python ETL pipeline that extracts live weather and air
 quality data from the Open-Meteo API, transforms and validates it, loads the
-results into a PostgreSQL database, and exports flat CSV files ready for Power
-BI or Plotly Dash.
+results into a PostgreSQL database, and exports flat CSV files ready for Plotly Dash.
 
 ---
 
